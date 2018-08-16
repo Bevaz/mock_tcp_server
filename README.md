@@ -1,23 +1,54 @@
-MOCK TCP SERVER
-===============
+# MOCK TCP CLIENT/SERVER
 
-A tcp server mock, if receive some matched bytes, it will response the specific file data. 
+A tcp server mock, if receive some matched bytes, it will response the specific file data.  
+And tcp client mock, send some data and wait for specific response.  
 
-#### Config it
+## Config it
+
 `server.conf`
+
 ```json
 {
+    "mode": "server",
     "host": "127.0.0.1",
     "port": 8080,
     "dump_request": true,
-    "matchs": [{
-        "type": "string",
-        "match_data": "efg",
-        "response_file": "test_1.txt"
+    "requests": [
+    {
+        "request_type":  "string",
+        "request_data":  "REQUEST DATA",
+        "response_type": "string",
+        "response_data": "RESPONSE DATA"
     }, {
-        "type": "byte",
-        "match_data": "616263",
-        "response_file": "test_2.txt"
+        "request_type":  "byte",
+        "request_data":  "616263",
+        "response_type": "byte",
+        "response_data": "A5A5A5",
+        "bye_packet":    true
+    }]
+}
+```
+
+`client.conf`
+
+```json
+{
+    "mode": "client",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "dump_request": true,
+    "requests": [
+    {
+        "request_type":  "string",
+        "request_data":  "REQUEST DATA",
+        "response_type": "string",
+        "response_data": "RESPONSE DATA"
+    }, {
+        "request_type":  "byte",
+        "request_data":  "616263",
+        "response_type": "byte",
+        "response_data": "A5A5A5",
+        "bye_packet":    true
     }]
 }
 ```
@@ -25,18 +56,20 @@ A tcp server mock, if receive some matched bytes, it will response the specific 
 - type
     string
     byte
-- match_data
+- data
     string: just input match string
     byte:ascii
 - dump_request
     if configured the dump_request = true, will dump the request data to file `./dump/{timestamp}/{ID}.dat`
 
-#### Start it
+## Start server
+
 ```bash
-$ go run main.go
+go run main.go -c server.conf
 ```
 
-#### Test it
-Open browser, and test `http://127.0.0.1:8080/abc` and `http://127.0.0.1:8080/efg`, you will get different data.
+## Test connection
 
-
+```bash
+go run main.go -c client.conf
+```
