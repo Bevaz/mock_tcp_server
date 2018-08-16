@@ -1,7 +1,7 @@
 # MOCK TCP CLIENT/SERVER
 
-A tcp server mock, if receive some matched bytes, it will response the specific file data.  
-And tcp client mock, send some data and wait for specific response.  
+A TCP server mock, if receive some matched bytes, it will response the specific file data.  
+And TCP client mock, send some data and wait for a specific response.  
 
 ## Config it
 
