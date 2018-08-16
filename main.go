@@ -113,7 +113,7 @@ func startServer() {
 	}
 
 	var tcpListener *net.TCPListener
-	if listener, e := net.ListenTCP("tcp", tcpAddr); e != nil {
+	if listener, e := net.ListenTCP("tcp4", tcpAddr); e != nil {
 		log.Fatalln(e)
 		return
 	} else {

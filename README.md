@@ -10,7 +10,7 @@ And tcp client mock, send some data and wait for specific response.
 ```json
 {
     "mode": "server",
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 8080,
     "dump_request": true,
     "requests": [
@@ -67,6 +67,13 @@ And tcp client mock, send some data and wait for specific response.
 ```bash
 go run main.go -c server.conf
 ```
+
+or with docker
+
+```bash
+docker run -i -p 8080:8080/tcp -v ${PWD}:/workdir bevaz/mock_tcp_server -c server.conf
+```
+
 
 ## Test connection
 
