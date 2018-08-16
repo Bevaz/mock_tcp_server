@@ -6,15 +6,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/julienschmidt/httprouter"
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 )
-
 
 type RequestItem struct {
 	RequestType  string `json:"request_type"`
@@ -25,56 +26,131 @@ type RequestItem struct {
 }
 
 type MockTCPConfig struct {
-	Mode        string      `json:"mode"`
-	Host        string      `json:"host"`
-	Port        int32       `json:"port"`
-	DumpRequest bool        `json:"dump_request"`
-	Requests     []RequestItem `json:"requests"`
+	Mode        string        `json:"mode"`
+	Host        string        `json:"host"`
+	Port        int32         `json:"port"`
+	DumpRequest bool          `json:"dump_request"`
+	Requests    []RequestItem `json:"requests"`
 }
 
 var (
-	conf = MockTCPConfig{}
-
-	reqID   int64 = 0
-	dumpDir       = "./dump"
-
-	configFile = "mocktcp.conf"
+	reqID              int64
+	dumpDir            = "./dump"
+	tcpListenerChannel = make(chan *net.TCPListener, 64)
+	tcpConnChannel     = make(chan *net.TCPConn, 64)
 )
 
 func main() {
 
 	log.SetOutput(os.Stdout)
 
+	var configFile string
+	var viaHTTP bool
 	short := " (shorthand)"
-
 	configfileUsage := "the mock tcp server/client config file"
+	configureViaHTTP := "start http server on port 8008"
 	flag.StringVar(&configFile, "config", "", configfileUsage)
 	flag.StringVar(&configFile, "c", "", configfileUsage+short)
+	flag.BoolVar(&viaHTTP, "h", false, configureViaHTTP)
 
 	flag.Parse()
 
+	if viaHTTP {
+		httpApp()
+	} else {
+		consoleApp(configFile)
+	}
+
+}
+
+func consoleApp(configFile string) {
 	if configFile == "" {
 		configFile = "mocktcp.conf"
 	}
 
-	if bFile, e := ioutil.ReadFile(configFile); e != nil {
+	conf := MockTCPConfig{}
+
+	ioFile, e := os.Open(configFile)
+	if e != nil {
 		log.Fatalln(e)
 		return
-	} else {
-		if e := json.Unmarshal(bFile, &conf); e != nil {
-			log.Fatalln(e)
-			return
-		}
+	}
+	decoder := json.NewDecoder(ioFile)
+	err := decoder.Decode(&conf)
+	if err != nil {
+		log.Fatalln(e)
+		return
 	}
 
 	if conf.Mode == "server" {
-		startServer()
+		startServer(conf)
 	} else if conf.Mode == "client" {
-		startClient()
+		startClient(conf)
 	}
 }
 
-func startClient() {
+func setup(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	decoder := json.NewDecoder(r.Body)
+	conf := MockTCPConfig{}
+	err := decoder.Decode(&conf)
+	if err != nil {
+		panic(err)
+	}
+	log.Println(conf.Mode)
+
+	if conf.Mode == "server" {
+		go startServer(conf)
+	} else if conf.Mode == "client" {
+		go startClient(conf)
+	}
+
+}
+
+func reset(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	loop := true
+	for loop {
+		select {
+		case x, ok := <-tcpListenerChannel:
+			if ok {
+				log.Printf("Closing TCP Listener %s.\n", x.Addr().String())
+				x.Close()
+			} else {
+				log.Println("Channel closed!")
+				loop = false
+			}
+		default:
+			log.Println("No value ready, moving on.")
+			loop = false
+		}
+	}
+	loop = true
+	for loop {
+		select {
+		case x, ok := <-tcpConnChannel:
+			if ok {
+				log.Printf("Closing TCP Connection %s.\n", x.RemoteAddr().String())
+				x.Close()
+			} else {
+				log.Println("Channel closed!")
+				loop = false
+			}
+		default:
+			log.Println("No value ready, moving on.")
+			loop = false
+		}
+	}
+
+}
+
+func httpApp() {
+	router := httprouter.New()
+	router.POST("/mock/setup", setup)
+	router.POST("/mock/reset", reset)
+
+	log.Fatalln(http.ListenAndServe(":8008", router))
+
+}
+func startClient(conf MockTCPConfig) {
 
 	var tcpAddr *net.TCPAddr
 	if addr, e := net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", conf.Host, conf.Port)); e != nil {
@@ -91,18 +167,19 @@ func startClient() {
 	} else {
 		tcpConn = conn
 	}
+	tcpConnChannel <- tcpConn
 
-	if e := createDumpDir(); e != nil {
+	if e := createDumpDir(conf); e != nil {
 		log.Fatal(e)
 		return
 	}
 
-	fmt.Printf("Sending to:%s:%d\n", conf.Host, conf.Port)
+	log.Printf("Sending to:%s:%d\n", conf.Host, conf.Port)
 
-	processClientConnection(tcpConn)
+	processClientConnection(tcpConn, conf)
 }
 
-func startServer() {
+func startServer(conf MockTCPConfig) {
 
 	var tcpAddr *net.TCPAddr
 	if addr, e := net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", conf.Host, conf.Port)); e != nil {
@@ -119,29 +196,30 @@ func startServer() {
 	} else {
 		tcpListener = listener
 	}
+	tcpListenerChannel <- tcpListener
 
-	if e := createDumpDir(); e != nil {
+	if e := createDumpDir(conf); e != nil {
 		log.Fatal(e)
 		return
 	}
 
-	fmt.Printf("Listening:%s:%d\n", conf.Host, conf.Port)
+	log.Printf("Listening:%s:%d\n", conf.Host, conf.Port)
 
 	for {
 		if conn, e := tcpListener.Accept(); e != nil {
-			log.Fatalln(e)
-			continue
+			log.Println(e)
+			break
 		} else {
-			go processServerConnection(conn)
+			go processServerConnection(conn, conf)
 		}
 	}
 }
 
-func processClientConnection(conn *net.TCPConn) {
+func processClientConnection(conn *net.TCPConn, conf MockTCPConfig) {
 	defer conn.Close()
 	atomic.AddInt64(&reqID, 1)
 
-	fmt.Printf("[%d]connected to server: %s\n", reqID, conn.RemoteAddr().String())
+	log.Printf("[%d]connected to server: %s\n", reqID, conn.RemoteAddr().String())
 
 	var buf [2048]byte
 	var e error
@@ -168,14 +246,14 @@ func processClientConnection(conn *net.TCPConn) {
 			log.Fatalln(e)
 			return
 		}
-		fmt.Printf("  sent %d bytes\n", l)
+		log.Printf("  sent %d bytes\n", l)
 
-		l, e = conn.Read(buf[0:]);
+		l, e = conn.Read(buf[0:])
 		if e != nil {
 			log.Fatalln(e)
 			return
 		}
-		fmt.Printf("  received %d bytes\n", l)
+		log.Printf("  received %d bytes\n", l)
 
 		if conf.DumpRequest {
 			filename := fmt.Sprintf("%s/%d.dat", dumpDir, reqID)
@@ -200,21 +278,21 @@ func processClientConnection(conn *net.TCPConn) {
 		}
 
 		if matched {
-			fmt.Printf("  [matched %s:%s] %s\n", requestItem.ResponseType, requestItem.ResponseData, requestItem.RequestData)
+			log.Printf("  [matched %s:%s] %s\n", requestItem.ResponseType, requestItem.ResponseData, requestItem.RequestData)
 		} else {
 			fmt.Println("no match.")
 			os.Exit(-1)
 		}
-		fmt.Printf("  --------\n")
+		log.Printf("  --------\n")
 	}
 	fmt.Println("all requests were sent.")
 }
 
-func processServerConnection(conn net.Conn) {
+func processServerConnection(conn net.Conn, conf MockTCPConfig) {
 	defer conn.Close()
 	atomic.AddInt64(&reqID, 1)
 
-	fmt.Printf("[%d]client connected: %s\n", reqID, conn.RemoteAddr().String())
+	log.Printf("[%d]client connected: %s\n", reqID, conn.RemoteAddr().String())
 
 	var buf [2048]byte
 	var bPayload []byte
@@ -226,13 +304,13 @@ func processServerConnection(conn net.Conn) {
 			log.Fatalln(e)
 			return
 		}
-		fmt.Printf("  received %d bytes\n", l)
+		log.Printf("  received %d bytes\n", l)
 
 		if conf.DumpRequest {
 			filename := fmt.Sprintf("%s/%d.dat", dumpDir, reqID)
 			ioutil.WriteFile(filename, buf[0:l], 0666)
 		}
-		matched :=false
+		matched := false
 		for _, requestItem := range conf.Requests {
 			if requestItem.RequestType == "string" {
 				if strings.Contains(string(buf[0:l]), requestItem.RequestData) {
@@ -252,7 +330,7 @@ func processServerConnection(conn net.Conn) {
 			}
 
 			if matched {
-				fmt.Printf("  [matched %s:%s] %s\n", requestItem.RequestType, requestItem.RequestData, requestItem.ResponseData)
+				log.Printf("  [matched %s:%s] %s\n", requestItem.RequestType, requestItem.RequestData, requestItem.ResponseData)
 
 				if requestItem.ResponseType == "string" {
 					bPayload = []byte(requestItem.ResponseData)
@@ -271,7 +349,7 @@ func processServerConnection(conn net.Conn) {
 					log.Fatalln(e)
 					return
 				}
-					fmt.Printf("  sent %d bytes\n", l)
+				log.Printf("  sent %d bytes\n", l)
 
 				if requestItem.ByePacket {
 					os.Exit(0)
@@ -282,15 +360,15 @@ func processServerConnection(conn net.Conn) {
 		if !matched {
 			fmt.Println("nothing matched.")
 		}
-		fmt.Printf("  --------\n")
+		log.Printf("  --------\n")
 	}
 }
 
-func createDumpDir() error {
+func createDumpDir(conf MockTCPConfig) error {
 	now := time.Now()
 	if conf.DumpRequest {
 		dumpDir = fmt.Sprintf("./dump/%d", now.UnixNano())
-		fmt.Printf("[dump dir]: %s\n", dumpDir)
+		log.Printf("[dump dir]: %s\n", dumpDir)
 		if !isDirExist(dumpDir) {
 			if e := os.MkdirAll(dumpDir, os.ModePerm); e != nil {
 				log.Fatal(e)
