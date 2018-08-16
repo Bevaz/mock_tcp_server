@@ -13,17 +13,32 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/gogap/mock_tcp_server/config"
 )
 
+
+type RequestItem struct {
+	RequestType  string `json:"request_type"`
+	RequestData  string `json:"request_data"`
+	ResponseType string `json:"response_type"`
+	ResponseData string `json:"response_data"`
+	ByePacket    bool   `json:"bye_packet"`
+}
+
+type MockTCPConfig struct {
+	Mode        string      `json:"mode"`
+	Host        string      `json:"host"`
+	Port        int32       `json:"port"`
+	DumpRequest bool        `json:"dump_request"`
+	Requests     []RequestItem `json:"requests"`
+}
+
 var (
-	conf = config.MockServerConfig{}
+	conf = MockTCPConfig{}
 
 	reqID   int64 = 0
 	dumpDir       = "./dump"
 
-	configFile = "server.conf"
+	configFile = "mocktcp.conf"
 )
 
 func main() {
@@ -32,16 +47,14 @@ func main() {
 
 	short := " (shorthand)"
 
-	configfileUsage := "the server config file"
+	configfileUsage := "the mock tcp server/client config file"
 	flag.StringVar(&configFile, "config", "", configfileUsage)
 	flag.StringVar(&configFile, "c", "", configfileUsage+short)
 
 	flag.Parse()
 
-	now := time.Now()
-
 	if configFile == "" {
-		configFile = "server.conf"
+		configFile = "mocktcp.conf"
 	}
 
 	if bFile, e := ioutil.ReadFile(configFile); e != nil {
@@ -53,6 +66,43 @@ func main() {
 			return
 		}
 	}
+
+	if conf.Mode == "server" {
+		startServer()
+	} else if conf.Mode == "client" {
+		startClient()
+	}
+}
+
+func startClient() {
+
+	var tcpAddr *net.TCPAddr
+	if addr, e := net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", conf.Host, conf.Port)); e != nil {
+		log.Fatalln(e)
+		return
+	} else {
+		tcpAddr = addr
+	}
+
+	var tcpConn *net.TCPConn
+	if conn, e := net.DialTCP("tcp4", nil, tcpAddr); e != nil {
+		log.Fatalln(e)
+		return
+	} else {
+		tcpConn = conn
+	}
+
+	if e := createDumpDir(); e != nil {
+		log.Fatal(e)
+		return
+	}
+
+	fmt.Printf("Sending to:%s:%d\n", conf.Host, conf.Port)
+
+	processClientConnection(tcpConn)
+}
+
+func startServer() {
 
 	var tcpAddr *net.TCPAddr
 	if addr, e := net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", conf.Host, conf.Port)); e != nil {
@@ -70,15 +120,9 @@ func main() {
 		tcpListener = listener
 	}
 
-	if conf.DumpRequest {
-		dumpDir = fmt.Sprintf("./dump/%d", now.UnixNano())
-		fmt.Printf("[dump dir]: %s\n", dumpDir)
-		if !is_dir_exist(dumpDir) {
-			if e := os.MkdirAll(dumpDir, os.ModePerm); e != nil {
-				log.Fatal(e)
-				return
-			}
-		}
+	if e := createDumpDir(); e != nil {
+		log.Fatal(e)
+		return
 	}
 
 	fmt.Printf("Listening:%s:%d\n", conf.Host, conf.Port)
@@ -88,64 +132,176 @@ func main() {
 			log.Fatalln(e)
 			continue
 		} else {
-			handle_client(conn)
-			conn.Close()
+			go processServerConnection(conn)
 		}
 	}
 }
 
-func handle_client(conn net.Conn) {
+func processClientConnection(conn *net.TCPConn) {
+	defer conn.Close()
+	atomic.AddInt64(&reqID, 1)
+
+	fmt.Printf("[%d]connected to server: %s\n", reqID, conn.RemoteAddr().String())
+
+	var buf [2048]byte
+	var e error
+	var l int
+
+	for _, requestItem := range conf.Requests {
+		matched := false
+		var bPayload []byte
+		if requestItem.RequestType == "string" {
+			bPayload = []byte(requestItem.RequestData)
+		} else if requestItem.RequestType == "byte" {
+			bPayload, e = hex.DecodeString(requestItem.RequestData)
+			if e != nil {
+				log.Fatalln(e)
+				return
+			}
+		} else {
+			log.Fatalln("unknown request item type, only could be [string|byte]")
+			return
+		}
+
+		l, e = conn.Write(bPayload)
+		if e != nil {
+			log.Fatalln(e)
+			return
+		}
+		fmt.Printf("  sent %d bytes\n", l)
+
+		l, e = conn.Read(buf[0:]);
+		if e != nil {
+			log.Fatalln(e)
+			return
+		}
+		fmt.Printf("  received %d bytes\n", l)
+
+		if conf.DumpRequest {
+			filename := fmt.Sprintf("%s/%d.dat", dumpDir, reqID)
+			ioutil.WriteFile(filename, buf[0:l], 0666)
+		}
+
+		if requestItem.ResponseType == "string" {
+			if strings.Contains(string(buf[0:l]), requestItem.ResponseData) {
+				matched = true
+			}
+		} else if requestItem.ResponseType == "byte" {
+			bPayload, e = hex.DecodeString(requestItem.ResponseData)
+			if e != nil {
+				log.Fatalln(e)
+				return
+			} else if bytes.Contains(buf[0:l], bPayload) {
+				matched = true
+			}
+		} else {
+			log.Fatalln("unknown response item type, only could be [string|byte]")
+			return
+		}
+
+		if matched {
+			fmt.Printf("  [matched %s:%s] %s\n", requestItem.ResponseType, requestItem.ResponseData, requestItem.RequestData)
+		} else {
+			fmt.Println("no match.")
+			os.Exit(-1)
+		}
+		fmt.Printf("  --------\n")
+	}
+	fmt.Println("all requests were sent.")
+}
+
+func processServerConnection(conn net.Conn) {
+	defer conn.Close()
 	atomic.AddInt64(&reqID, 1)
 
 	fmt.Printf("[%d]client connected: %s\n", reqID, conn.RemoteAddr().String())
 
 	var buf [2048]byte
+	var bPayload []byte
+	var l int
+	var e error
 
-	if l, e := conn.Read(buf[0:]); e != nil {
-		log.Fatalln(e)
-		return
-	} else {
+	for l, e = conn.Read(buf[0:]); l > 0; l, e = conn.Read(buf[0:]) {
+		if e != nil {
+			log.Fatalln(e)
+			return
+		}
+		fmt.Printf("  received %d bytes\n", l)
+
 		if conf.DumpRequest {
 			filename := fmt.Sprintf("%s/%d.dat", dumpDir, reqID)
 			ioutil.WriteFile(filename, buf[0:l], 0666)
 		}
-		for _, matchItem := range conf.Matches {
-			matched := false
-			if matchItem.Type == "string" {
-				if strings.Contains(string(buf[0:l]), matchItem.MatchData) {
+		matched :=false
+		for _, requestItem := range conf.Requests {
+			if requestItem.RequestType == "string" {
+				if strings.Contains(string(buf[0:l]), requestItem.RequestData) {
 					matched = true
 				}
-			} else if matchItem.Type == "byte" {
-				if bMath, e := hex.DecodeString(matchItem.MatchData); e != nil {
+			} else if requestItem.RequestType == "byte" {
+				bPayload, e = hex.DecodeString(requestItem.RequestData)
+				if e != nil {
 					log.Fatalln(e)
 					return
-				} else if bytes.Contains(buf[0:l], bMath) {
+				} else if bytes.Contains(buf[0:l], bPayload) {
 					matched = true
 				}
 			} else {
-				log.Fatalln("unknown match item type, only could be [string|byte]")
+				log.Fatalln("unknown request item type, only could be [string|byte]")
 				return
 			}
 
 			if matched {
-				fmt.Printf("[matched %s:%s]\n%s\n", matchItem.Type, matchItem.MatchData, matchItem.ResponseFile)
-				if fd, e := ioutil.ReadFile(matchItem.ResponseFile); e != nil {
-					log.Fatalln(e)
-					return
-				} else {
-					if _, e := conn.Write(fd); e != nil {
+				fmt.Printf("  [matched %s:%s] %s\n", requestItem.RequestType, requestItem.RequestData, requestItem.ResponseData)
+
+				if requestItem.ResponseType == "string" {
+					bPayload = []byte(requestItem.ResponseData)
+				} else if requestItem.ResponseType == "byte" {
+					bPayload, e = hex.DecodeString(requestItem.ResponseData)
+					if e != nil {
 						log.Fatalln(e)
 						return
 					}
+				} else {
+					log.Fatalln("unknown response item type, only could be [string|byte]")
 					return
 				}
+				l, e := conn.Write(bPayload)
+				if e != nil {
+					log.Fatalln(e)
+					return
+				}
+					fmt.Printf("  sent %d bytes\n", l)
+
+				if requestItem.ByePacket {
+					os.Exit(0)
+				}
+				break
 			}
 		}
-		fmt.Println("nothing matched.")
+		if !matched {
+			fmt.Println("nothing matched.")
+		}
+		fmt.Printf("  --------\n")
 	}
 }
 
-func is_dir_exist(path string) bool {
+func createDumpDir() error {
+	now := time.Now()
+	if conf.DumpRequest {
+		dumpDir = fmt.Sprintf("./dump/%d", now.UnixNano())
+		fmt.Printf("[dump dir]: %s\n", dumpDir)
+		if !isDirExist(dumpDir) {
+			if e := os.MkdirAll(dumpDir, os.ModePerm); e != nil {
+				log.Fatal(e)
+				return e
+			}
+		}
+	}
+	return nil
+}
+
+func isDirExist(path string) bool {
 	fi, err := os.Stat(path)
 
 	if err != nil {
