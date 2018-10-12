@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/julienschmidt/httprouter"
 	"io/ioutil"
 	"log"
 	"net"
@@ -15,12 +14,15 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/julienschmidt/httprouter"
 )
 
 type RequestItem struct {
 	RequestType  string `json:"request_type"`
 	RequestData  string `json:"request_data"`
 	ResponseType string `json:"response_type"`
+	ResponseSize int    `json:"response_size"`
 	ResponseData string `json:"response_data"`
 	ByePacket    bool   `json:"bye_packet"`
 }
@@ -253,12 +255,17 @@ func processClientConnection(conn *net.TCPConn, conf MockTCPConfig) {
 			log.Fatalln(e)
 			return
 		}
-		log.Printf("  received %d bytes\n", l)
 
 		if conf.DumpRequest {
 			filename := fmt.Sprintf("%s/%d.dat", dumpDir, reqID)
 			ioutil.WriteFile(filename, buf[0:l], 0666)
 		}
+
+		if requestItem.ResponseSize > 0 && requestItem.ResponseSize != l {
+			log.Printf("  received %d bytes, but expected %d\n", l, requestItem.ResponseSize)
+			os.Exit(-1)
+		}
+		log.Printf("  received %d bytes\n", l)
 
 		if requestItem.ResponseType == "string" {
 			if strings.Contains(string(buf[0:l]), requestItem.ResponseData) {
