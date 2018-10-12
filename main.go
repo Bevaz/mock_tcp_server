@@ -250,6 +250,11 @@ func processClientConnection(conn *net.TCPConn, conf MockTCPConfig) {
 		}
 		log.Printf("  sent %d bytes\n", l)
 
+		if requestItem.ByePacket {
+			log.Printf("  It was the last packet. We close connection without waiting for response.\n")
+			return
+		}
+
 		l, e = conn.Read(buf[0:])
 		if e != nil {
 			log.Fatalln(e)
